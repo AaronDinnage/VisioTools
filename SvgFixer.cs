@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Xml;
 using System.Xml.Linq;
 
@@ -80,19 +81,43 @@ namespace VisioSvgFixer
                 Console.WriteLine("Processing file: {0} ...", file);
                 bool updated = false;
 
-                var xDoc = XDocument.Load(file, LoadOptions.None);
-                var ns = xDoc.Root.GetDefaultNamespace();
-                var xmlNs = xDoc.Root.GetNamespaceOfPrefix("xml");
-
-                // Visio exports an xml:space="preserve" attribute on the <svg> element preventing reformatting to optimise file size
-                var spaceAttribute = xDoc.Root.Attribute(xmlNs + "space");
-                if (spaceAttribute != null && String.Equals(spaceAttribute.Value, "preserve", StringComparison.OrdinalIgnoreCase))
+                // Strip whitespace first
+                string originalXml = File.ReadAllText(file);
+                string outputXml = originalXml;
+                outputXml = Regex.Replace(outputXml, @"\n[\t]*", "\n"); // Remove whitespace at the start of a line
+                outputXml = Regex.Replace(outputXml, @">[\s\r\n]*<", "><"); // Remove white space between tags
+                if (!String.Equals(originalXml, outputXml))
                 {
-                    spaceAttribute.SetValue("default");
+                    File.WriteAllText(file, outputXml);
                     updated = true;
                 }
 
-                // Remove all comments
+                var xDoc = ReadFile(file);
+                var ns = xDoc.Root.GetDefaultNamespace();
+
+                // Visio exports an xml:space="preserve" attribute on the <svg> element
+                var xmlNs = xDoc.Root.GetNamespaceOfPrefix("xml");
+                var spaceAttribute = xDoc.Root.Attribute(xmlNs + "space");
+                if (spaceAttribute != null && String.Equals(spaceAttribute.Value, "preserve", StringComparison.OrdinalIgnoreCase))
+                {
+                    spaceAttribute.Remove();
+                    WriteFile(file, xDoc);
+
+                    // Reload ...
+                    xDoc = ReadFile(file);
+                    ns = xDoc.Root.GetDefaultNamespace();
+                    xmlNs = null;
+
+                    updated = true;
+                }
+
+                var docType = xDoc.DocumentType;
+                if (docType != null)
+                {
+                    docType.Remove();
+                    updated = true;
+                }
+
                 var comments = xDoc.DescendantNodes().OfType<XComment>();
                 if (comments.Count() != 0)
                 {
@@ -100,32 +125,62 @@ namespace VisioSvgFixer
                     updated = true;
                 }
 
-                // Remove all "title" and "desc" nodes.
-                RecursiveRemove(xDoc.Root.Elements(), ns, "title", ref updated);
-                RecursiveRemove(xDoc.Root.Elements(), ns, "desc", ref updated);
+                // XML Events namespace
+                var evNs = xDoc.Root.Attributes().Where(x => x.IsNamespaceDeclaration && x.Name.LocalName == "ev").FirstOrDefault();
+                if (evNs != null)
+                {
+                    evNs.Remove();
+                    updated = true;
+                }
+
+                var rootDimensions = xDoc.Root.Attributes().Where(x => x.Name == "width" || x.Name == "height");
+                if (rootDimensions.Count() != 0)
+                {
+                    rootDimensions.Remove();
+                    updated = true;
+                }
+
+                var titleNodes = xDoc.Root.DescendantNodes().OfType<XElement>().Where(x => x.Name == ns + "title");
+                if (titleNodes.Count() != 0)
+                {
+                    titleNodes.Remove();
+                    updated = true;
+                }
+
+                var descNodes = xDoc.Root.DescendantNodes().OfType<XElement>().Where(x => x.Name == ns + "desc");
+                if (descNodes.Count() != 0)
+                {
+                    descNodes.Remove();
+                    updated = true;
+                }
+
+                var idAttributes = xDoc.Root.DescendantNodes().OfType<XElement>().Where(x => x.Attribute("id") != null);
+                if (idAttributes.Count() != 0)
+                {
+                    idAttributes.Attributes("id").Remove();
+                    updated = true;
+                }
 
                 if (updated)
                 {
                     Console.WriteLine("Saving file: {0}", file);
-                    xDoc.Save(file, SaveOptions.DisableFormatting); // SaveOptions.DisableFormatting removes all whitespace
+                    WriteFile(file, xDoc);
                 }
             }
         }
 
-        static void RecursiveRemove(IEnumerable<XElement> subElements, XNamespace ns, string tag, ref bool updated)
+        private static void WriteFile(string file, XDocument xDoc)
         {
-            foreach (var subElement in subElements)
-            {
-                var element = subElement.Element(ns + tag);
-                if (element != null)
-                {
-                    element.Remove();
-                    updated = true;
-                }
-
-                RecursiveRemove(subElement.Elements(), ns, tag, ref updated);
-            }
+            var xmlWriterSettings = new XmlWriterSettings() { Indent = false, OmitXmlDeclaration = true };
+            using (var xmlWriter = XmlWriter.Create(file, xmlWriterSettings))
+                xDoc.Save(xmlWriter);
         }
 
+        private static XDocument ReadFile(string file)
+        {
+            var readerSettings = new XmlReaderSettings() { IgnoreWhitespace = true };
+            using (var xmlReader = XmlReader.Create(file, readerSettings))
+                return XDocument.Load(file, LoadOptions.None);
+        }
     }
 }

@@ -35,6 +35,13 @@ namespace VisioLinkChecker
             Update,
         }
 
+        enum UpdateType
+        {
+            ObjectText,
+            LinkText,
+            LinkUrl,
+        }
+
         static AppMode mode = AppMode.None;
 
         static void Main(string[] args)
@@ -180,17 +187,44 @@ namespace VisioLinkChecker
             Console.WriteLine("Updating links ...");
             Console.WriteLine();
 
-            var linkSub = new Dictionary<string, string>();
+            var updates = new List<Tuple<UpdateType, string, string>>();
 
             using (var streamReader = new StreamReader("LinkUpdates.csv"))
             {
                 string line;
                 while ((line = streamReader.ReadLine()) != null)
                 {
+                    if (String.IsNullOrWhiteSpace(line))
+                        continue;
+
                     var components = line.Split(',');
-                    linkSub.Add(components[0], components[1]);
+                    if (components.Length != 3)
+                    {
+                        Console.WriteLine("Error reading CSV, expecting three values per line (type, find, replace).");
+                        continue;
+                    }
+
+                    UpdateType updateType;
+                    if (!Enum.TryParse<UpdateType>(components[0], true, out updateType))
+                    {
+                        Console.WriteLine("Error reading type in CSV, expecting three values per line (type, find, replace).");
+                        continue;
+                    }
+
+                    var tuple = new Tuple<UpdateType, string, string>(updateType, components[1], components[2]);
+                    updates.Add(tuple);
                 }
             }
+
+            if (updates.Count() == 0)
+            {
+                Console.WriteLine("No updates in CSV");
+                return;
+            }
+
+            var objectTextUpdates = updates.Where(update => update.Item1 == UpdateType.ObjectText).Select(x => new Tuple<string, string>(x.Item2, x.Item3)).ToList();
+            var linkTextUpdates = updates.Where(update => update.Item1 == UpdateType.LinkText).Select(x => new Tuple<string, string>(x.Item2, x.Item3)).ToList();
+            var linkUrlUpdates = updates.Where(update => update.Item1 == UpdateType.LinkUrl).Select(x => new Tuple<string, string>(x.Item2, x.Item3)).ToList();
 
             foreach (var file in files)
             {
@@ -206,47 +240,85 @@ namespace VisioLinkChecker
                         {
                             using (var entryStream = entry.Open())
                             {
-                                var xDoc = XDocument.Load(entryStream, LoadOptions.PreserveWhitespace | LoadOptions.SetLineInfo);
+                                var xDoc = XDocument.Load(entryStream);
                                 var ns = xDoc.Root.GetDefaultNamespace();
 
-                                var linkElements = xDoc.Root.Element(ns + "Shapes")
-                                    .Elements(ns + "Shape")
-                                    .Elements(ns + "Section").Where(x => x.Attribute("N").Value == "Hyperlink")
-                                    .Elements(ns + "Row");
-
                                 bool updated = false;
-                                foreach (var linkElement in linkElements)
+
+                                if (objectTextUpdates.Count() > 0)
                                 {
-                                    var cells = linkElement.Elements(ns + "Cell");
-                                    
-                                    // Look for link updates ...
-                                    string address = cells.First(x => x.Attribute("N").Value == "Address").Attribute("V").Value;
-                                    string extraInfo = cells.First(x => x.Attribute("N").Value == "ExtraInfo").Attribute("V").Value;
+                                    var textElements = xDoc.Root.DescendantNodes().OfType<XElement>()
+                                        .Where(node => node.Name == ns + "Text");
 
-                                    string url = address;
-                                    if (!String.IsNullOrWhiteSpace(extraInfo))
-                                        url += "?" + extraInfo;
-
-                                    if (linkSub.ContainsKey(url))
+                                    foreach (var textUpdate in objectTextUpdates)
                                     {
-                                        var newUrlParts = linkSub[url].Split('?');
-
-                                        string newAddress = newUrlParts[0];
-                                        string newExtraInfo = newUrlParts.Length == 2 ? newUrlParts[0] : String.Empty;
-
-                                        cells.First(x => x.Attribute("N").Value == "Address").Attribute("V").Value = newAddress;
-                                        cells.First(x => x.Attribute("N").Value == "ExtraInfo").Attribute("V").Value = newExtraInfo;
-
-                                        updated = true;
+                                        var textMatches = textElements.Where(x => x.Value == textUpdate.Item1 + "\n");
+                                        foreach (var match in textMatches)
+                                        {
+                                            match.Value = textUpdate.Item2;
+                                            updated = true;
+                                        }
                                     }
+                                }
 
-                                    // Ensure all links open in a New Window ...
-                                    var newWindowV = cells.First(x => x.Attribute("N").Value == "NewWindow").Attribute("V");
-                                    if (newWindowV.Value == "0")
+                                if (linkTextUpdates.Count() > 0 || linkUrlUpdates.Count() > 0)
+                                {
+                                    var linkElements = xDoc.Root.DescendantNodes().OfType<XElement>()
+                                        .Where(node => node.Name == ns + "Section").Where(node => node.Attribute("N").Value == "Hyperlink")
+                                        .Elements(ns + "Row");
+
+                                    foreach (var linkElement in linkElements)
                                     {
-                                        newWindowV.Value = "1";
-                                        updated = true;
+                                        var cells = linkElement.Elements(ns + "Cell");
+
+                                        string description = cells.First(x => x.Attribute("N").Value == "Description").Attribute("V").Value;
+                                        string address = cells.First(x => x.Attribute("N").Value == "Address").Attribute("V").Value;
+                                        string extraInfo = cells.First(x => x.Attribute("N").Value == "ExtraInfo").Attribute("V").Value;
+                                        string url = address;
+                                        if (!String.IsNullOrWhiteSpace(extraInfo))
+                                            url += "?" + extraInfo;
+
+                                        var linkUrlUpdate = linkUrlUpdates.SingleOrDefault(x=>x.Item1 == url);
+                                        if (linkUrlUpdate != null)
+                                        {
+                                            var newUrlParts = linkUrlUpdate.Item2.Split('?');
+
+                                            string newAddress = newUrlParts[0];
+                                            string newExtraInfo = newUrlParts.Length == 2 ? newUrlParts[0] : String.Empty;
+
+                                            cells.First(x => x.Attribute("N").Value == "Address").Attribute("V").Value = newAddress;
+                                            cells.First(x => x.Attribute("N").Value == "ExtraInfo").Attribute("V").Value = newExtraInfo;
+
+                                            updated = true;
+                                        }
+
+                                        var linkTextUpdate = linkTextUpdates.SingleOrDefault(x=>x.Item1 == description);
+                                        if (linkTextUpdate != null)
+                                        {
+                                            cells.First(x => x.Attribute("N").Value == "Description").Attribute("V").Value = linkTextUpdate.Item2;
+
+                                            updated = true;
+                                        }
+
+                                        // Ensure all links open in a New Window ...
+                                        var newWindowV = cells.First(x => x.Attribute("N").Value == "NewWindow").Attribute("V");
+                                        if (newWindowV.Value == "0")
+                                        {
+                                            newWindowV.Value = "1";
+                                            updated = true;
+                                        }
                                     }
+                                }
+
+                                // Remove all alt-tags
+                                var altTexts = xDoc.Root.DescendantNodes().OfType<XElement>()
+                                    .Where(node => node.Name == ns + "Section")
+                                    .Where(node => node.Attribute("N").Value == "User")
+                                    .Where(node => node.Elements().Count() == 1 && node.Elements().First().Name == ns + "Row" && node.Elements().First().Attribute("N").Value == "visAltText");
+                                if (altTexts.Count() > 0)
+                                {
+                                    altTexts.Remove();
+                                    updated = true;
                                 }
 
                                 if (updated)
@@ -254,6 +326,7 @@ namespace VisioLinkChecker
                                     Console.WriteLine("Saving file page: {0}", entry.FullName);
                                     entryStream.Seek(0, SeekOrigin.Begin);
                                     xDoc.Save(entryStream, SaveOptions.DisableFormatting);
+                                    entryStream.SetLength(entryStream.Position);
                                 }
                             }
                         }
